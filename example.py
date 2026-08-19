@@ -14,38 +14,38 @@ def main() -> None:
         "coordinates": [
           [
             [
-              -3.8429727661878132,
-              40.41612839959822
+              -7.8807465,
+              42.3211809
             ],
             [
-              -3.8233315,
-              40.41612839959822
+              -7.8747688,
+              42.3211809
             ],
             [
-              -3.8233315,
-              40.4046795
+              -7.8759851,
+              42.3227607
             ],
             [
-              -3.8429727661878132,
-              40.4046795
+              -7.8828375,
+              42.3222746
             ],
             [
-              -3.8429727661878132,
-              40.41612839959822
+              -7.8807465,
+              42.3211809
             ]
           ]
         ]
       },
     }
 
-    terrain_path, metadata_path = generate_terrain_from_geojson(
+    terrain_path, geotif, metadata_path = generate_terrain_from_geojson(
         geojson=area,
         output_path=Path("output/terrain.glb"),
         zoom=15,
         sample_step=1,
         vertical_exaggeration=2,
         crs="EPSG:25829",
-        max_tiles=64,
+        max_tiles=650,
         workers=8,
         timeout=30.0,
     )

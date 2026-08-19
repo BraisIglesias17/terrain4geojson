@@ -27,14 +27,17 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-
+import rasterio
 import mercantile
 import numpy as np
 import requests
 import trimesh
 from PIL import Image
 from pyproj import CRS, Transformer
-from shapely.geometry import Point, shape
+from rasterio.features import geometry_mask
+from rasterio.transform import Affine
+from rasterio.warp import Resampling, calculate_default_transform, reproject
+from shapely.geometry import Point, shape,mapping
 from shapely.ops import transform as shapely_transform
 from shapely.prepared import prep
 
@@ -42,7 +45,7 @@ from shapely.prepared import prep
 MAPTERHORN_TILE_URL = "https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"
 TILE_SIZE = 512
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
-
+GEOTIFF_NODATA = -9999.0
 
 @dataclass(frozen=True)
 class TileGrid:
@@ -410,6 +413,165 @@ def build_clipped_mesh(
     }
     return mesh, metadata
 
+def mosaic_web_mercator_transform(grid: TileGrid) -> Affine:
+    """Return the EPSG:3857 affine transform of the full tile mosaic.
+
+    The transform maps raster pixel corners—not centres—to Web Mercator metres.
+    Rasterio consequently locates each sample at the same +0.5 pixel centre used
+    by :func:`global_pixel_centres_web_mercator`.
+    """
+
+    world_pixels = TILE_SIZE * (2**grid.zoom)
+    resolution = (2.0 * WEB_MERCATOR_HALF_WORLD) / world_pixels
+    west = (
+        -WEB_MERCATOR_HALF_WORLD
+        + grid.min_x * TILE_SIZE * resolution
+    )
+    north = (
+        WEB_MERCATOR_HALF_WORLD
+        - grid.min_y * TILE_SIZE * resolution
+    )
+    return Affine(resolution, 0.0, west, 0.0, -resolution, north)
+
+
+
+def export_elevation_geotiff(
+    mosaic: np.ndarray,
+    grid: TileGrid,
+    polygon_wgs84,
+    local_crs: CRS,
+    output_path: Path,
+) -> dict[str, Any]:
+    """Reproject, polygon-mask, and save the full elevation grid as GeoTIFF.
+
+    The source mosaic is natively aligned to EPSG:3857 XYZ pixels. It is first
+    masked by the requested polygon, then bilinearly reprojected into the same
+    projected CRS used for the GLB. ``sample_step`` is intentionally not used:
+    the GeoTIFF remains the full analytical grid while the GLB can be simplified.
+    """
+
+    source_crs = CRS.from_epsg(3857)
+    source_transform = mosaic_web_mercator_transform(grid)
+    source_height, source_width = mosaic.shape
+
+    to_web_mercator = Transformer.from_crs(
+        "EPSG:4326",
+        source_crs,
+        always_xy=True,
+    )
+    polygon_3857 = shapely_transform(
+        to_web_mercator.transform,
+        polygon_wgs84,
+    )
+
+    # True means that the pixel centre lies inside the polygon. Pixels outside
+    # it (and pixels inside polygon holes) receive the GeoTIFF NoData value.
+    source_inside = geometry_mask(
+        [mapping(polygon_3857)],
+        out_shape=mosaic.shape,
+        transform=source_transform,
+        invert=True,
+        all_touched=False,
+    )
+    source_data = np.where(
+        source_inside,
+        mosaic,
+        GEOTIFF_NODATA,
+    ).astype(np.float32)
+
+    left, bottom, right, top = rasterio.transform.array_bounds(
+        source_height,
+        source_width,
+        source_transform,
+    )
+    destination_transform, destination_width, destination_height = (
+        calculate_default_transform(
+            source_crs,
+            local_crs,
+            source_width,
+            source_height,
+            left,
+            bottom,
+            right,
+            top,
+        )
+    )
+
+    destination = np.full(
+        (destination_height, destination_width),
+        GEOTIFF_NODATA,
+        dtype=np.float32,
+    )
+    reproject(
+        source=source_data,
+        destination=destination,
+        src_transform=source_transform,
+        src_crs=source_crs,
+        src_nodata=GEOTIFF_NODATA,
+        dst_transform=destination_transform,
+        dst_crs=local_crs,
+        dst_nodata=GEOTIFF_NODATA,
+        resampling=Resampling.bilinear,
+        num_threads=2,
+    )
+
+    # Reapply the polygon in the destination grid. This prevents interpolation
+    # at the reprojection boundary from creating values outside the requested AOI.
+    to_local = Transformer.from_crs("EPSG:4326", local_crs, always_xy=True)
+    polygon_projected = shapely_transform(to_local.transform, polygon_wgs84)
+    destination_inside = geometry_mask(
+        [mapping(polygon_projected)],
+        out_shape=destination.shape,
+        transform=destination_transform,
+        invert=True,
+        all_touched=False,
+    )
+    destination[~destination_inside] = GEOTIFF_NODATA
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        output_path,
+        "w",
+        driver="GTiff",
+        height=destination_height,
+        width=destination_width,
+        count=1,
+        dtype="float32",
+        crs=local_crs,
+        transform=destination_transform,
+        nodata=GEOTIFF_NODATA,
+        compress="deflate",
+        predictor=3,
+        BIGTIFF="IF_SAFER",
+    ) as dataset:
+        dataset.write(destination, 1)
+        dataset.set_band_description(1, "elevation_m")
+        dataset.update_tags(
+            source="Mapterhorn",
+            units="metres",
+            area_mask="GeoJSON polygon",
+        )
+
+    valid = destination != GEOTIFF_NODATA
+    if not np.any(valid):
+        raise ValueError("No valid elevation cells remain in the GeoTIFF.")
+
+    return {
+        "path": str(output_path),
+        "crs": local_crs.to_string(),
+        "width": int(destination_width),
+        "height": int(destination_height),
+        "resolution_m": {
+            "x": float(abs(destination_transform.a)),
+            "y": float(abs(destination_transform.e)),
+        },
+        "nodata": GEOTIFF_NODATA,
+        "valid_cells": int(np.count_nonzero(valid)),
+        "elevation_m": {
+            "minimum": float(np.min(destination[valid])),
+            "maximum": float(np.max(destination[valid])),
+        },
+    }
 
 def generate_terrain(
     geojson_path: Path,
@@ -532,7 +694,17 @@ def generate_terrain_from_geojson(
     )
 
     mosaic = download_mosaic(grid, workers=workers, timeout=timeout)
-    # Delete tiles outside poligon
+
+    geotiff_path = output_path.with_suffix(".tif")
+    geotiff_metadata = export_elevation_geotiff(
+        mosaic=mosaic,
+        grid=grid,
+        polygon_wgs84=polygon_wgs84,
+        local_crs=local_crs,
+        output_path=geotiff_path,
+    )
+
+
     mesh, metadata = build_clipped_mesh(
         mosaic=mosaic,
         grid=grid,
@@ -546,10 +718,16 @@ def generate_terrain_from_geojson(
     mesh.export(output_path, file_type="glb")
 
     metadata_path = output_path.with_suffix(".metadata.json")
+    metadata["files"] = {
+        "glb": str(output_path),
+        "geotiff": str(geotiff_path),
+        "metadata": str(metadata_path),
+    }
+    metadata["geotiff"] = geotiff_metadata
     with metadata_path.open("w", encoding="utf-8") as file:
         json.dump(metadata, file, indent=2)
         file.write("\n")
 
-    return output_path, metadata_path
+    return output_path, geotiff_path, metadata_path
 
 
