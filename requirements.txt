@@ -1,0 +1,7 @@
+mercantile>=1.2,<2
+numpy>=2.0,<3
+Pillow>=11,<13
+pyproj>=3.7,<4
+requests>=2.32,<3
+shapely>=2.0,<3
+trimesh>=4.0,<5

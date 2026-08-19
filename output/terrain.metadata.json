@@ -1,0 +1,42 @@
+{
+  "source": "Mapterhorn",
+  "source_url": "https://mapterhorn.com/",
+  "tile_encoding": "Terrarium RGB in 512 px WebP",
+  "zoom": 15,
+  "tile_grid": {
+    "min_x": 16034,
+    "max_x": 16035,
+    "min_y": 12355,
+    "max_y": 12357,
+    "count": 6
+  },
+  "local_crs": "EPSG:25829",
+  "origin": {
+    "x_m": 937613.3769332943,
+    "y_m": 4485460.610914213,
+    "elevation_m": 691.8984375
+  },
+  "sample_step_pixels": 1,
+  "vertical_exaggeration": 2,
+  "elevation_m": {
+    "minimum": 691.8984375,
+    "maximum": 736.21875
+  },
+  "mesh": {
+    "vertices": 643032,
+    "triangles": 1282830,
+    "bounds_local_m": [
+      [
+        -0.018587501719594002,
+        0.20751655101776123,
+        0.0
+      ],
+      [
+        1741.4912109375,
+        1370.0279541015625,
+        88.640625
+      ]
+    ]
+  },
+  "note": "GLB coordinates are local metres. Recover projected X/Y by adding origin.x_m/origin.y_m. Recover unexaggerated altitude by dividing local Z by vertical_exaggeration and adding origin.elevation_m."
+}
